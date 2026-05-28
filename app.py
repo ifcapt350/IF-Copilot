@@ -7,7 +7,7 @@ import json
 from groq import Groq
 import shutil
 
-# 1. Setup the Engine (Securely using Streamlit Secrets)
+# 1. Setup the Engine 
 try:
     client = Groq(api_key=st.secrets["GROQ_API_KEY"])
 except Exception:
@@ -91,7 +91,6 @@ def scrape_and_extract_flights(username, status_console):
 
     status_console.info("🧠 Telemetry secured. Groq AI is decoding the fleet data...")
     
-    # ANTI-HALLUCINATION UPDATE 1: Explicit mapping for the extractor
     extraction_prompt = f"""
     Look at this text scraped from an aviation tracking website for the user '{username}'.
     Extract the data for EVERY SINGLE FLIGHT found into a JSON list containing one dictionary per aircraft.
@@ -123,7 +122,7 @@ def scrape_and_extract_flights(username, status_console):
         return []
 
 
-# --- TOOL 2: AUTONOMOUS ATC/ATIS SCANNER ---
+# --- TOOL 2: TARGETED ATC/ATIS SCANNER ---
 def scrape_atis_data(airport_code, status_console):
     chrome_path = shutil.which("chromium") or shutil.which("chromium-browser")
     raw_text = ""
@@ -140,17 +139,22 @@ def scrape_atis_data(airport_code, status_console):
             page.goto("https://if-flightplan-tools.vercel.app/livestatus", timeout=20000)
             page.wait_for_timeout(4000) 
             
-            if page.locator(f"text='{airport_code}'").count() > 0:
+            # THE FIX: Locate ONLY the row for the requested airport
+            airport_row = page.locator("tr", has_text=airport_code).first
+            
+            if airport_row.count() > 0:
                 status_console.info(f"✅ Intercepted {airport_code} ATC signals. Decoding ATIS...")
                 try:
-                    atis_buttons = page.locator("text=ATIS")
-                    for i in range(atis_buttons.count()):
-                        atis_buttons.nth(i).click(timeout=1000)
+                    # ONLY click the ATIS button inside this specific row
+                    atis_btn = airport_row.locator("text='ATIS'")
+                    if atis_btn.count() > 0:
+                        atis_btn.first.click(timeout=2000)
+                        page.wait_for_timeout(1500)
                 except Exception:
                     pass
                 
-                page.wait_for_timeout(1500) 
-                raw_text = page.locator("body").inner_text()
+                # Extract just the table data instead of the whole page to reduce noise
+                raw_text = page.locator("table").inner_text()
             else:
                 raw_text = f"No active ATC or ATIS found for {airport_code} at this time. The airport is uncontrolled."
                 
@@ -212,12 +216,11 @@ if st.session_state.has_searched:
 
             flight_context = "\n".join([f"{str(key).title()}: {str(value)}" for key, value in active_flight_data.items()])
             
-            # ANTI-HALLUCINATION UPDATE 2: Strict rules for the Chatbot
             system_context = f"""You are an expert aviation co-pilot. You are assisting a pilot in a flight simulator.
             Here is the LIVE RADAR DATA for their current flight: {flight_context}
             
             YOUR CAPABILITIES AND RULES:
-            1. ABSOLUTE MANDATE ON NUMBERS: If the user asks for their speed, altitude, ETA, or any other flight statistic, you MUST quote the exact number from the radar data above. DO NOT GUESS. DO NOT invent standard numbers like 34,000. If the data says "Data Unavailable", explicitly tell the user that the instrument is offline or unavailable.
+            1. ABSOLUTE MANDATE ON NUMBERS: If the user asks for their speed, altitude, ETA, or any other flight statistic, you MUST quote the exact number from the radar data above. DO NOT GUESS.
             2. ATC/ATIS RADAR: If the user asks about active ATC, open frequencies, ATIS, or landing/departing runways at ANY specific airport, you MUST trigger the ATC radar tool by replying ONLY with: [FETCH_ATC: ICAO] (e.g., [FETCH_ATC: EGLL]). 
             3. ICAO DECODING: You have full permission to translate 4-letter ICAO codes into real-world airport names using your internal knowledge.
             """
@@ -229,7 +232,7 @@ if st.session_state.has_searched:
                     response = client.chat.completions.create(
                         messages=[{"role": "user", "content": full_prompt}],
                         model="llama-3.3-70b-versatile",
-                        temperature=0.1, # Turning the creativity dial almost to zero so it stops making things up
+                        temperature=0.1, 
                     )
                     reply_text = response.choices[0].message.content
                 except Exception as e:
@@ -246,12 +249,13 @@ if st.session_state.has_searched:
                     scraped_atc_data = scrape_atis_data(icao_code, status_console)
                     status_console.empty()
                     
-                    follow_up_prompt = f"""Here is the LIVE ATC/ATIS DATA scraped from the server for {icao_code}:
+                    # Explicit instruction to only look at the requested airport's data
+                    follow_up_prompt = f"""Here is the LIVE ATC/ATIS DATA scraped from the server. 
                     
                     {scraped_atc_data}
                     
                     Based ONLY on this data, answer the pilot's original question: '{prompt}'. 
-                    CRITICAL: If the data shows the airport is staffed but the ATIS text is blank/missing, explicitly state that ATIS hasn't been published yet by the controller.
+                    CRITICAL: Ensure you are ONLY reading data associated with the requested airport code ({icao_code}). Ignore other airports. If the ATIS text is blank/missing for {icao_code}, explicitly state that ATIS hasn't been published yet by the controller.
                     """
                     
                     response2 = client.chat.completions.create(
