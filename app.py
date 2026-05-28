@@ -1,9 +1,11 @@
+import os
+os.system("playwright install chromium")
+
 import streamlit as st
 from playwright.sync_api import sync_playwright
 import json
 from groq import Groq
 import shutil
-import os
 
 # 1. Setup the Engine (Securely using Streamlit Secrets)
 try:
@@ -20,22 +22,17 @@ if "flights" not in st.session_state:
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
-# 3. The Live Scraper (Native Cloud Version)
+# --- TOOL 1: THE FLIGHT SCRAPER ---
 def scrape_and_extract_flights(username, status_console):
     raw_page_text = ""
-    
-    # THE FIX: Hunt down the native Linux Chromium browser
     chrome_path = shutil.which("chromium") or shutil.which("chromium-browser")
     
     with sync_playwright() as p:
         status_console.info("📡 Booting up radar systems...")
-        
         try:
-            # Launch using the ultra-light native browser
             if chrome_path:
                 browser = p.chromium.launch(headless=True, executable_path=chrome_path, args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"])
             else:
-                # Fallback if it can't find it
                 browser = p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
                 
             page = browser.new_page()
@@ -92,21 +89,15 @@ def scrape_and_extract_flights(username, status_console):
             if 'browser' in locals():
                 browser.close()
 
-    # --- PHASE B: Groq 3.3 Data Extraction ---
     status_console.info("🧠 Telemetry secured. Groq AI is decoding the fleet data...")
     extraction_prompt = f"""
     Look at this text scraped from an aviation tracking website for the user '{username}'.
-    CRITICAL INSTRUCTION: There may be MULTIPLE active flights in this text, separated by '=== NEXT AIRCRAFT ==='. 
-    You MUST extract the data for EVERY SINGLE FLIGHT found.
-    
-    Extract them into a JSON list containing one dictionary per aircraft.
+    Extract the data for EVERY SINGLE FLIGHT found into a JSON list containing one dictionary per aircraft.
     Return ONLY a valid JSON list. Do NOT use markdown formatting.
-    Include these keys for each dictionary: "callsign", "aircraft", "livery", "route", "time_to_destination", "time_to_tod", "eta", "cruise_altitude", "ground_speed", and "flight_plan".
+    Include these keys: "callsign", "aircraft", "livery", "route", "time_to_destination", "time_to_tod", "eta", "cruise_altitude", "ground_speed", and "flight_plan".
     If ANY piece of data is missing, put "Data Unavailable". 
     If no flights are found, return an empty list: []
-    
-    Messy Text:
-    {raw_page_text}
+    Messy Text: {raw_page_text}
     """
     
     try:
@@ -115,25 +106,68 @@ def scrape_and_extract_flights(username, status_console):
             model="llama-3.3-70b-versatile",
             temperature=0, 
         )
-        
         raw_ai_text = extraction_response.choices[0].message.content.strip()
-        
         raw_ai_text = raw_ai_text.strip("` \n")
         if raw_ai_text.lower().startswith("json"):
             raw_ai_text = raw_ai_text[4:].strip("` \n")
             
         flights_list = json.loads(raw_ai_text)
-        
         if isinstance(flights_list, dict):
             flights_list = [] if not flights_list else [flights_list]
         return flights_list
-        
     except Exception as e:
-        st.error(f"Radar Comms Failure (Groq JSON Parsing): {e}")
         return []
 
-# 4. The App UI
-st.title("✈️ Custom IF Co-Pilot v17 (Native Cloud)")
+
+# --- TOOL 2: AUTONOMOUS ATC/ATIS SCANNER ---
+def scrape_atis_data(airport_code, status_console):
+    chrome_path = shutil.which("chromium") or shutil.which("chromium-browser")
+    raw_text = ""
+    
+    with sync_playwright() as p:
+        status_console.info(f"📻 Tuning radios to {airport_code} ATC frequencies...")
+        try:
+            if chrome_path:
+                browser = p.chromium.launch(headless=True, executable_path=chrome_path, args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"])
+            else:
+                browser = p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
+                
+            page = browser.new_page()
+            
+            # Go directly to the Live Status page
+            page.goto("https://if-flightplan-tools.vercel.app/livestatus", timeout=20000)
+            page.wait_for_timeout(4000) # Give the table time to load from the API
+            
+            # Check if the airport is currently staffed
+            if page.locator(f"text='{airport_code}'").count() > 0:
+                status_console.info(f"✅ Intercepted {airport_code} ATC signals. Decoding ATIS...")
+                
+                # Expand ATIS drop-downs (click anything containing 'ATIS')
+                try:
+                    atis_buttons = page.locator("text=ATIS")
+                    for i in range(atis_buttons.count()):
+                        atis_buttons.nth(i).click(timeout=1000)
+                except Exception:
+                    pass
+                
+                page.wait_for_timeout(1500) # Wait for text to expand visually
+                
+                # Rip the entire table data so Groq can analyze it
+                raw_text = page.locator("body").inner_text()
+            else:
+                raw_text = f"No active ATC or ATIS found for {airport_code} at this time. The airport is uncontrolled."
+                
+        except Exception as e:
+            raw_text = f"ATC Communication Error: {e}"
+        finally:
+            if 'browser' in locals():
+                browser.close()
+                
+    return raw_text
+
+
+# --- 4. THE APP UI ---
+st.title("✈️ Custom IF Co-Pilot v18 (Autonomous ATC)")
 
 username = st.text_input("Enter IF Username to track:", "Capt350")
 
@@ -146,7 +180,7 @@ if st.button("Search Radar (Live Scan)"):
 
 st.divider()
 
-# 5. Persistent UI Logic
+# --- 5. PERSISTENT UI & CHAT LOGIC ---
 if st.session_state.has_searched:
     if len(st.session_state.flights) == 0:
         st.warning("⚠️ Radar sweep complete, but no active flights were found for this username.")
@@ -171,30 +205,37 @@ if st.session_state.has_searched:
         
         st.divider()
 
+        # Display Chat History
         for message in st.session_state.messages:
             with st.chat_message(message["role"]):
                 st.markdown(message["content"])
 
+        # Chat Input
         if prompt := st.chat_input("Ask your Co-Pilot a question (Press Enter to send)..."):
+            # 1. Print User Message
             st.chat_message("user").markdown(prompt)
             st.session_state.messages.append({"role": "user", "content": prompt})
 
+            # 2. Build the LLM Brain
+            flight_context = "\n".join([f"{str(key).title()}: {str(value)}" for key, value in active_flight_data.items()])
+            
+            system_context = f"""You are an expert aviation co-pilot. You are assisting a pilot in a flight simulator.
+            Here is the LIVE RADAR DATA for their current flight: {flight_context}
+            
+            NEW CAPABILITY - ATC/ATIS RADAR:
+            If the user asks about active ATC, open frequencies, ATIS, or landing/departing runways at ANY specific airport (e.g., "What runways are in use at EGLL?", "Is there ATC at KLAX?"), you MUST trigger the ATC radar tool.
+            To trigger the tool, reply with EXACTLY this command format and NOTHING else:
+            [FETCH_ATC: ICAO]
+            (Replace ICAO with the 4-letter code, e.g., [FETCH_ATC: EGLL]). 
+            Do not add any other text to your response if you use this command.
+            
+            If they ask a normal question, answer normally using your aviation knowledge.
+            """
+            
+            full_prompt = f"{system_context}\n\nPilot's Command/Question: {prompt}"
+            
+            # 3. First AI Decision
             with st.spinner("Consulting Quick Reference Handbook..."):
-                flight_context = "\n".join([f"{str(key).title()}: {str(value)}" for key, value in active_flight_data.items()])
-                
-                system_context = f"""You are an expert aviation co-pilot. You are assisting a pilot in a flight simulator.
-                Here is the LIVE RADAR DATA for their current flight:
-                {flight_context}
-                
-                YOUR CAPABILITIES:
-                1. If the user asks about their current flight stats (speed, altitude, eta), answer strictly using the radar data above. 
-                2. ICAO DECODING: You have full permission to translate 4-letter ICAO codes (like FACT, KLAX, EGLL) into real-world airport names and cities using your internal knowledge. 
-                3. TACTICAL ADVICE: If the user asks for diversion airports or weather, use your internal knowledge to provide real-world options based on their current route.
-                4. CRITICAL: Do not invent fake airports. If you genuinely do not recognize an ICAO code, just state the 4-letter code.
-                """
-                
-                full_prompt = f"{system_context}\n\nPilot's Command/Question: {prompt}"
-                
                 try:
                     response = client.chat.completions.create(
                         messages=[{"role": "user", "content": full_prompt}],
@@ -203,7 +244,48 @@ if st.session_state.has_searched:
                     reply_text = response.choices[0].message.content
                 except Exception as e:
                     reply_text = f"⚠️ RADIO FAILURE: API connection error. ({e})"
+            
+            # 4. Intercept the hidden command if the AI decides it needs ATC data
+            if "[FETCH_ATC:" in reply_text:
+                try:
+                    # Extract the 4-letter ICAO code from the command
+                    icao_code = reply_text.split("[FETCH_ATC:")[1].split("]")[0].strip().upper()
+                    
+                    # Tell the user what the AI is doing
+                    with st.chat_message("assistant"):
+                        st.markdown(f"📻 *Requesting ATC telemetry for {icao_code}... standby.*")
+                    st.session_state.messages.append({"role": "assistant", "content": f"📻 *Requesting ATC telemetry for {icao_code}... standby.*"})
+                    
+                    # Autonomously run the web scraper
+                    status_console = st.empty()
+                    scraped_atc_data = scrape_atis_data(icao_code, status_console)
+                    status_console.empty()
+                    
+                    # Feed the scraped data back to the AI for the final answer
+                    follow_up_prompt = f"""Here is the LIVE ATC/ATIS DATA scraped from the server for {icao_code}:
+                    
+                    {scraped_atc_data}
+                    
+                    Based ONLY on this data, answer the pilot's original question: '{prompt}'. 
+                    CRITICAL: If the data shows the airport is staffed but the ATIS text is blank/missing, explicitly state that ATIS hasn't been published yet by the controller.
+                    """
+                    
+                    response2 = client.chat.completions.create(
+                        messages=[{"role": "user", "content": follow_up_prompt}],
+                        model="llama-3.3-70b-versatile",
+                    )
+                    final_reply = response2.choices[0].message.content
+                    
+                except Exception as e:
+                    final_reply = f"⚠️ Failed to decode ATC transmission: {e}"
                 
-            with st.chat_message("assistant"):
-                st.markdown(reply_text)
-            st.session_state.messages.append({"role": "assistant", "content": reply_text})
+                # Print the intelligent answer
+                with st.chat_message("assistant"):
+                    st.markdown(final_reply)
+                st.session_state.messages.append({"role": "assistant", "content": final_reply})
+                
+            else:
+                # If no command was triggered, just print the normal response
+                with st.chat_message("assistant"):
+                    st.markdown(reply_text)
+                st.session_state.messages.append({"role": "assistant", "content": reply_text})
