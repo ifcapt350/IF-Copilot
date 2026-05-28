@@ -90,13 +90,17 @@ def scrape_and_extract_flights(username, status_console):
                 browser.close()
 
     status_console.info("🧠 Telemetry secured. Groq AI is decoding the fleet data...")
+    
+    # ANTI-HALLUCINATION UPDATE 1: Explicit mapping for the extractor
     extraction_prompt = f"""
     Look at this text scraped from an aviation tracking website for the user '{username}'.
     Extract the data for EVERY SINGLE FLIGHT found into a JSON list containing one dictionary per aircraft.
     Return ONLY a valid JSON list. Do NOT use markdown formatting.
-    Include these keys: "callsign", "aircraft", "livery", "route", "time_to_destination", "time_to_tod", "eta", "cruise_altitude", "ground_speed", and "flight_plan".
+    
+    Include these exact keys: "callsign", "aircraft", "livery", "route", "time_to_destination", "time_to_tod", "eta", "cruise_altitude" (CRITICAL: Look for the number next to the word 'Cruise:'), "ground_speed" (CRITICAL: Look for the number next to 'Groundspeed:'), and "flight_plan".
     If ANY piece of data is missing, put "Data Unavailable". 
     If no flights are found, return an empty list: []
+    
     Messy Text: {raw_page_text}
     """
     
@@ -133,16 +137,11 @@ def scrape_atis_data(airport_code, status_console):
                 browser = p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
                 
             page = browser.new_page()
-            
-            # Go directly to the Live Status page
             page.goto("https://if-flightplan-tools.vercel.app/livestatus", timeout=20000)
-            page.wait_for_timeout(4000) # Give the table time to load from the API
+            page.wait_for_timeout(4000) 
             
-            # Check if the airport is currently staffed
             if page.locator(f"text='{airport_code}'").count() > 0:
                 status_console.info(f"✅ Intercepted {airport_code} ATC signals. Decoding ATIS...")
-                
-                # Expand ATIS drop-downs (click anything containing 'ATIS')
                 try:
                     atis_buttons = page.locator("text=ATIS")
                     for i in range(atis_buttons.count()):
@@ -150,9 +149,7 @@ def scrape_atis_data(airport_code, status_console):
                 except Exception:
                     pass
                 
-                page.wait_for_timeout(1500) # Wait for text to expand visually
-                
-                # Rip the entire table data so Groq can analyze it
+                page.wait_for_timeout(1500) 
                 raw_text = page.locator("body").inner_text()
             else:
                 raw_text = f"No active ATC or ATIS found for {airport_code} at this time. The airport is uncontrolled."
@@ -167,7 +164,7 @@ def scrape_atis_data(airport_code, status_console):
 
 
 # --- 4. THE APP UI ---
-st.title("✈️ Infinite Flight AI Tracker")
+st.title("✈️ Custom IF Co-Pilot v19 (Anti-Hallucination)")
 
 username = st.text_input("Enter IF Username to track:", "Capt350")
 
@@ -205,63 +202,50 @@ if st.session_state.has_searched:
         
         st.divider()
 
-        # Display Chat History
         for message in st.session_state.messages:
             with st.chat_message(message["role"]):
                 st.markdown(message["content"])
 
-        # Chat Input
         if prompt := st.chat_input("Ask your Co-Pilot a question (Press Enter to send)..."):
-            # 1. Print User Message
             st.chat_message("user").markdown(prompt)
             st.session_state.messages.append({"role": "user", "content": prompt})
 
-            # 2. Build the LLM Brain
             flight_context = "\n".join([f"{str(key).title()}: {str(value)}" for key, value in active_flight_data.items()])
             
+            # ANTI-HALLUCINATION UPDATE 2: Strict rules for the Chatbot
             system_context = f"""You are an expert aviation co-pilot. You are assisting a pilot in a flight simulator.
             Here is the LIVE RADAR DATA for their current flight: {flight_context}
             
-            NEW CAPABILITY - ATC/ATIS RADAR:
-            If the user asks about active ATC, open frequencies, ATIS, or landing/departing runways at ANY specific airport (e.g., "What runways are in use at EGLL?", "Is there ATC at KLAX?"), you MUST trigger the ATC radar tool.
-            To trigger the tool, reply with EXACTLY this command format and NOTHING else:
-            [FETCH_ATC: ICAO]
-            (Replace ICAO with the 4-letter code, e.g., [FETCH_ATC: EGLL]). 
-            Do not add any other text to your response if you use this command.
-            
-            If they ask a normal question, answer normally using your aviation knowledge.
+            YOUR CAPABILITIES AND RULES:
+            1. ABSOLUTE MANDATE ON NUMBERS: If the user asks for their speed, altitude, ETA, or any other flight statistic, you MUST quote the exact number from the radar data above. DO NOT GUESS. DO NOT invent standard numbers like 34,000. If the data says "Data Unavailable", explicitly tell the user that the instrument is offline or unavailable.
+            2. ATC/ATIS RADAR: If the user asks about active ATC, open frequencies, ATIS, or landing/departing runways at ANY specific airport, you MUST trigger the ATC radar tool by replying ONLY with: [FETCH_ATC: ICAO] (e.g., [FETCH_ATC: EGLL]). 
+            3. ICAO DECODING: You have full permission to translate 4-letter ICAO codes into real-world airport names using your internal knowledge.
             """
             
             full_prompt = f"{system_context}\n\nPilot's Command/Question: {prompt}"
             
-            # 3. First AI Decision
             with st.spinner("Consulting Quick Reference Handbook..."):
                 try:
                     response = client.chat.completions.create(
                         messages=[{"role": "user", "content": full_prompt}],
                         model="llama-3.3-70b-versatile",
+                        temperature=0.1, # Turning the creativity dial almost to zero so it stops making things up
                     )
                     reply_text = response.choices[0].message.content
                 except Exception as e:
                     reply_text = f"⚠️ RADIO FAILURE: API connection error. ({e})"
             
-            # 4. Intercept the hidden command if the AI decides it needs ATC data
             if "[FETCH_ATC:" in reply_text:
                 try:
-                    # Extract the 4-letter ICAO code from the command
                     icao_code = reply_text.split("[FETCH_ATC:")[1].split("]")[0].strip().upper()
-                    
-                    # Tell the user what the AI is doing
                     with st.chat_message("assistant"):
                         st.markdown(f"📻 *Requesting ATC telemetry for {icao_code}... standby.*")
                     st.session_state.messages.append({"role": "assistant", "content": f"📻 *Requesting ATC telemetry for {icao_code}... standby.*"})
                     
-                    # Autonomously run the web scraper
                     status_console = st.empty()
                     scraped_atc_data = scrape_atis_data(icao_code, status_console)
                     status_console.empty()
                     
-                    # Feed the scraped data back to the AI for the final answer
                     follow_up_prompt = f"""Here is the LIVE ATC/ATIS DATA scraped from the server for {icao_code}:
                     
                     {scraped_atc_data}
@@ -273,19 +257,18 @@ if st.session_state.has_searched:
                     response2 = client.chat.completions.create(
                         messages=[{"role": "user", "content": follow_up_prompt}],
                         model="llama-3.3-70b-versatile",
+                        temperature=0.1,
                     )
                     final_reply = response2.choices[0].message.content
                     
                 except Exception as e:
                     final_reply = f"⚠️ Failed to decode ATC transmission: {e}"
                 
-                # Print the intelligent answer
                 with st.chat_message("assistant"):
                     st.markdown(final_reply)
                 st.session_state.messages.append({"role": "assistant", "content": final_reply})
                 
             else:
-                # If no command was triggered, just print the normal response
                 with st.chat_message("assistant"):
                     st.markdown(reply_text)
                 st.session_state.messages.append({"role": "assistant", "content": reply_text})
