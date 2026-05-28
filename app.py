@@ -167,7 +167,7 @@ def scrape_atis_data(airport_code, status_console):
 
 
 # --- 4. THE APP UI ---
-st.title("✈️ Custom IF Co-Pilot v18 (Autonomous ATC)")
+st.title("✈️ Infinite Flight AI Tracker")
 
 username = st.text_input("Enter IF Username to track:", "Capt350")
 
