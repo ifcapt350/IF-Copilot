@@ -1,13 +1,16 @@
-import os
-os.system("playwright install chromium")
-
 import streamlit as st
 from playwright.sync_api import sync_playwright
 import json
 from groq import Groq
+import shutil
+import os
 
-# 1. Setup the Engine (PASTE YOUR GROQ KEY HERE)
-client = Groq(api_key=st.secrets["GROQ_API_KEY"])
+# 1. Setup the Engine (Securely using Streamlit Secrets)
+try:
+    client = Groq(api_key=st.secrets["GROQ_API_KEY"])
+except Exception:
+    st.error("⚠️ Radar Offline: GROQ_API_KEY is missing from Streamlit Secrets.")
+    st.stop()
 
 # 2. Bulletproof State Management
 if "has_searched" not in st.session_state:
@@ -17,17 +20,27 @@ if "flights" not in st.session_state:
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
-# 3. The Live Scraper
+# 3. The Live Scraper (Native Cloud Version)
 def scrape_and_extract_flights(username, status_console):
     raw_page_text = ""
     
+    # THE FIX: Hunt down the native Linux Chromium browser
+    chrome_path = shutil.which("chromium") or shutil.which("chromium-browser")
+    
     with sync_playwright() as p:
         status_console.info("📡 Booting up radar systems...")
-        browser = p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"])
-        page = browser.new_page()
-        raw_pages = [] 
         
         try:
+            # Launch using the ultra-light native browser
+            if chrome_path:
+                browser = p.chromium.launch(headless=True, executable_path=chrome_path, args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"])
+            else:
+                # Fallback if it can't find it
+                browser = p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
+                
+            page = browser.new_page()
+            raw_pages = [] 
+            
             status_console.info(f"🛰️ Pinging IF servers for callsign: {username}...")
             page.goto("https://if-flightplan-tools.vercel.app/flightstatus", timeout=20000)
             page.locator("label:has-text('Username:') + input").fill(username)
@@ -51,11 +64,8 @@ def scrape_and_extract_flights(username, status_console):
                     
                     try:
                         page.locator("button:has-text('Open FlightPlan')").click(timeout=2000)
-                        
-                        # WAIT 6 SECONDS: Guarantee the external IF servers populate the data
                         page.wait_for_timeout(6000) 
                         
-                        # THE DOM MUTATION: Destroy input boxes and replace them with plain text
                         page.evaluate('''
                             const inputs = document.querySelectorAll('input');
                             for (let i = 0; i < inputs.length; i++) {
@@ -65,8 +75,7 @@ def scrape_and_extract_flights(username, status_console):
                                 }
                             }
                         ''')
-                        
-                        page.wait_for_timeout(500) # Quick buffer for the DOM to settle
+                        page.wait_for_timeout(500)
                     except Exception:
                         pass 
                         
@@ -80,9 +89,10 @@ def scrape_and_extract_flights(username, status_console):
             st.error(f"Radar malfunction or Tracker Website Timeout: {e}")
             return []
         finally:
-            browser.close()
+            if 'browser' in locals():
+                browser.close()
 
-    # --- PHASE B: Fortified Multi-Plane Extraction ---
+    # --- PHASE B: Groq 3.3 Data Extraction ---
     status_console.info("🧠 Telemetry secured. Groq AI is decoding the fleet data...")
     extraction_prompt = f"""
     Look at this text scraped from an aviation tracking website for the user '{username}'.
@@ -123,7 +133,7 @@ def scrape_and_extract_flights(username, status_console):
         return []
 
 # 4. The App UI
-st.title("✈️ Infinite Flight AI Tracker")
+st.title("✈️ Custom IF Co-Pilot v17 (Native Cloud)")
 
 username = st.text_input("Enter IF Username to track:", "Capt350")
 
@@ -161,7 +171,6 @@ if st.session_state.has_searched:
         
         st.divider()
 
-        # The Chat Logic
         for message in st.session_state.messages:
             with st.chat_message(message["role"]):
                 st.markdown(message["content"])
@@ -193,7 +202,7 @@ if st.session_state.has_searched:
                     )
                     reply_text = response.choices[0].message.content
                 except Exception as e:
-                    reply_text = f"⚠️ RADIO FAILURE: API connection error. Check your API key. ({e})"
+                    reply_text = f"⚠️ RADIO FAILURE: API connection error. ({e})"
                 
             with st.chat_message("assistant"):
                 st.markdown(reply_text)
