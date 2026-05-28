@@ -6,7 +6,7 @@ import json
 from groq import Groq
 
 # 1. Setup the Engine (PASTE YOUR GROQ KEY HERE)
-client = Groq(api_key="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")
+client = Groq(api_key=st.secrets["GROQ_API_KEY"])
 
 # 2. Bulletproof State Management
 if "has_searched" not in st.session_state:
@@ -22,7 +22,7 @@ def scrape_and_extract_flights(username, status_console):
     
     with sync_playwright() as p:
         status_console.info("📡 Booting up radar systems...")
-        browser = p.chromium.launch(headless=True) 
+        browser = p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"])
         page = browser.new_page()
         raw_pages = [] 
         
